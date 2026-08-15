@@ -1,0 +1,29 @@
+# secrets
+.env
+*.pem
+*.key
+
+# data: papers, extracted assets, rendered audio
+data/
+models/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# local db
+*.sqlite3
+*.sqlite3-journal
+
+# editors / os
+.vscode/
+.idea/
+.DS_Store
+
+# agent scratch
+.omc/

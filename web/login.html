@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Research Reader</title>
+<style>
+  :root { --bg:#faf9f7; --panel:#fff; --ink:#1a1a1a; --muted:#6b6b6b; --line:#e2e0dc; --accent:#b4532a; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#16151a; --panel:#1f1e25; --ink:#eceaf0; --muted:#9d9aa8; --line:#33313d; --accent:#e08a5f; }
+  }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg);
+    color:var(--ink); font:16px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif; }
+  form { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:26px; width:min(330px,90vw); }
+  h1 { font-size:1.05rem; margin:0 0 16px; }
+  input { width:100%; padding:10px 12px; border-radius:8px; border:1px solid var(--line);
+    background:var(--bg); color:var(--ink); margin-bottom:12px; }
+  button { width:100%; background:var(--accent); color:#fff; border:0; border-radius:8px;
+    padding:10px; font-weight:600; cursor:pointer; }
+  .err { color:#b03030; font-size:.82rem; margin-bottom:10px; }
+</style>
+</head>
+<body>
+  <form method="post" action="/login">
+    <h1>Research Reader</h1>
+    <div class="err" id="e" hidden>Wrong password.</div>
+    <input type="password" name="password" placeholder="Password" autofocus required>
+    <button type="submit">Enter</button>
+  </form>
+  <script>
+    if (new URLSearchParams(location.search).has("error")) document.getElementById("e").hidden = false;
+  </script>
+</body>
+</html>
