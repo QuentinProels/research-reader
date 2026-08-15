@@ -18,6 +18,12 @@ Rules:
 - Drop the reference list, acknowledgements, and author affiliation blocks.
 - Replace inline citation markers ([12], (Smith et al., 2020)) with nothing, or with
   "prior work" where the sentence would otherwise not parse.
+- NEVER remove or reword a reference to a figure, table, or equation. Keep "Figure 3",
+  "Fig. 3", "Table 2" exactly as written, including when they appear in parentheses:
+  "... attention (Figure 2)" must keep "Figure 2". These are not citations. Each one is
+  the anchor where a spoken description of that figure gets inserted, so dropping one
+  silently moves the description to the end of the recording, away from the text it
+  explains. Rephrasing "Table 1" to "the corresponding table" breaks it just as badly.
 - Describe equations qualitatively, in words a listener can follow. Never read symbols aloud
   one by one. "The loss is a weighted sum of a reconstruction error and a KL divergence term"
   is right; "L equals alpha times x sub i" is wrong.

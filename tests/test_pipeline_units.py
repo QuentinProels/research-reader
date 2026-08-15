@@ -112,3 +112,39 @@ class TestIngest:
 
     def test_magic_bytes_accept_pdf(self):
         ingest.check_magic_bytes(b"%PDF-1.7")
+
+
+class TestReflowPreservesReferences:
+    """Runs against the live llama-server; skipped when it is not up.
+
+    Regression: the reflow prompt told the model to strip parenthetical citation
+    markers, and it generalised that to "(Figure 2)" and rewrote "Table 1" as "the
+    corresponding table". Every figure reference vanished, so every figure description
+    fell through to the end of the recording instead of landing next to the text that
+    explains it -- which is the one thing this project exists to do.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_llm(self):
+        from app import llm
+
+        ok, detail = llm.health()
+        if not ok:
+            pytest.skip(f"llama-server unavailable: {detail}")
+
+    def test_figure_and_table_references_survive(self):
+        from app import llm
+
+        out = llm.reflow(
+            'We call our attention "Scaled Dot-Product Attention" (Figure 2). '
+            "The input has dimension dk [5]. The model follows this architecture "
+            "(Figure 1), using stacked layers (Smith et al., 2020). See Table 1."
+        )
+        for label in ("Figure 1", "Figure 2", "Table 1"):
+            assert _reference_pattern(label).search(out), f"{label} was dropped by reflow: {out!r}"
+
+    def test_citations_are_still_stripped(self):
+        from app import llm
+
+        out = llm.reflow("The model has dimension dk [5], improving on prior art (Smith et al., 2020).")
+        assert "[5]" not in out and "Smith" not in out
