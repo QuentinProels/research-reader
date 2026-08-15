@@ -11,6 +11,16 @@ from app import store
 
 @pytest.fixture(autouse=True)
 def _clean_db():
+    # These tests truncate tables. Refuse to touch anything that is not obviously a
+    # throwaway database -- an earlier version of this file ran against DATABASE_URL
+    # from .env and deleted queued papers out from under a running worker.
+    from app.config import settings
+
+    if not settings.database_url.rstrip("/").endswith("_test"):
+        pytest.fail(
+            f"refusing to run destructive tests against {settings.database_url!r}; "
+            "tests/conftest.py should have redirected this to a _test database"
+        )
     try:
         store.init_db()
     except Exception as exc:  # noqa: BLE001

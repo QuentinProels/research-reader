@@ -17,6 +17,7 @@ import os
 import signal
 import socket
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -27,6 +28,7 @@ log = logging.getLogger("worker")
 
 POLL_SECONDS = 3
 REAP_EVERY_SECONDS = 60
+HEARTBEAT_SECONDS = 15
 
 _stopping = False
 _current_paper: str | None = None
@@ -49,6 +51,20 @@ def _pdf_path_for(job: dict) -> Path:
     return settings.papers_dir / job["id"] / "source.pdf"
 
 
+def _heartbeat_loop(worker_id: str, stop: threading.Event) -> None:
+    """Announce liveness on its own thread.
+
+    The poll loop cannot do this: it disappears into pipeline.run for the length of a
+    whole paper, so a worker that was busy rendering looked dead to the UI, which then
+    warned that the queue would not drain -- exactly backwards.
+    """
+    while not stop.wait(HEARTBEAT_SECONDS):
+        try:
+            store.worker_seen(worker_id)
+        except Exception:  # noqa: BLE001 -- a blip here must not take the worker down
+            log.warning("heartbeat failed", exc_info=True)
+
+
 def run_forever() -> None:
     global _current_paper
     worker_id = f"{socket.gethostname()}:{os.getpid()}"
@@ -56,6 +72,12 @@ def run_forever() -> None:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
     log.info("worker %s up, polling every %ss", worker_id, POLL_SECONDS)
+
+    store.worker_seen(worker_id)
+    stop_heartbeat = threading.Event()
+    threading.Thread(
+        target=_heartbeat_loop, args=(worker_id, stop_heartbeat), daemon=True, name="heartbeat"
+    ).start()
 
     last_reap = 0.0
     try:
@@ -85,6 +107,7 @@ def run_forever() -> None:
             _current_paper = None
     finally:
         _current_paper = None
+        stop_heartbeat.set()
         store.worker_gone(worker_id)
         log.info("worker %s stopped", worker_id)
 
