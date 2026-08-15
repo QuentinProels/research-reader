@@ -38,9 +38,13 @@ def login_page():
 
 
 @app.post("/login")
-def login(password: str = Form(...)):
+def login(request: Request, password: str = Form(...)):
     if not auth.verify_password(password):
         return RedirectResponse("/login?error=1", status_code=303)
+    # Secure only over TLS: through the tunnel this is https, but a browser will
+    # silently drop a Secure cookie on a plain-http localhost visit, which would
+    # make login look broken for anyone testing on the box itself.
+    forwarded = request.headers.get("x-forwarded-proto", request.url.scheme)
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(
         auth.COOKIE_NAME,
@@ -48,7 +52,7 @@ def login(password: str = Form(...)):
         max_age=auth.MAX_AGE_SECONDS,
         httponly=True,
         samesite="lax",
-        secure=True,
+        secure=forwarded == "https",
     )
     return response
 

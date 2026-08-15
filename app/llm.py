@@ -46,12 +46,22 @@ def _headers() -> dict[str, str]:
     return headers
 
 
-def _chat(messages: list[dict], max_tokens: int = 2048, temperature: float = 0.3) -> str:
+def _chat(
+    messages: list[dict],
+    max_tokens: int = 2048,
+    temperature: float = 0.3,
+    thinking: bool = False,
+) -> str:
+    # llama-server here runs with --reasoning-budget -1, so Qwen thinks at length by
+    # default. On reflow that measured 32.4s / 1955 tokens versus 1.0s / 43 tokens with
+    # thinking off, for byte-identical output: these are mechanical rewriting tasks with
+    # nothing to reason about. Left as a parameter because Q&A (step 6) will want it on.
     payload = {
         "model": settings.llm_model,
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
+        "chat_template_kwargs": {"enable_thinking": thinking},
     }
     with httpx.Client(timeout=_TIMEOUT) as client:
         response = client.post(
