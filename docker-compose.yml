@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: reader-postgres
+    environment:
+      POSTGRES_USER: reader
+      POSTGRES_DB: reader
+      # Read from a file, not from .env. A bcrypt hash contains '$', and compose
+      # interpolates '$VAR' inside .env values -- so sourcing secrets from there
+      # silently mangles them. The app reads .env; compose reads only this file.
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+    secrets:
+      - pg_password
+    ports:
+      # Host 5432 is already taken by another postgres, and this is bound to
+      # loopback only -- the box is tunnel-exposed and the DB has no business
+      # being reachable from outside it.
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reader -d reader"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+secrets:
+  pg_password:
+    file: ./secrets/pg_password
+
+volumes:
+  pgdata:

@@ -43,17 +43,25 @@ PDF upload or URL
 ```bash
 uv sync                       # python deps
 ./scripts/fetch_models.sh     # Kokoro weights, ~350MB, once
-cp .env.example .env          # then fill in LLM_API_KEY and APP_PASSWORD_HASH
+cp .env.example .env          # then fill in LLM_API_KEY and DATABASE_URL
+
+mkdir -p secrets && chmod 700 secrets
+head -c 18 /dev/urandom | base64 | tr -d '=+/' > secrets/pg_password   # then paste it into DATABASE_URL
+uv run python -c "import bcrypt,getpass;print(bcrypt.hashpw(getpass.getpass().encode(),bcrypt.gensalt()).decode())" > secrets/app_password.hash
+
+docker compose up -d          # postgres + pgvector on 127.0.0.1:5433
 uv run uvicorn app.main:app --host 127.0.0.1 --port 8090
 ```
 
-Generate the password hash:
-
-```bash
-uv run python -c "import bcrypt,getpass;print(bcrypt.hashpw(getpass.getpass().encode(),bcrypt.gensalt()).decode())"
-```
-
 Tests: `uv run pytest`
+
+### Why secrets sit in files, not `.env`
+
+`docker compose` auto-loads `.env` and interpolates `$VAR` inside *every* value it finds
+there, whether or not the compose file references it. A bcrypt hash is full of `$`, so
+storing it in `.env` gets it silently mangled. Both secrets therefore live in `./secrets/`
+(gitignored, `chmod 700`): compose mounts `pg_password` as a docker secret, and the app
+reads `app_password.hash` directly. `.env` holds paths and non-`$` config only.
 
 ## Hardware note
 
@@ -75,9 +83,6 @@ timeout.
 
 ## Deliberate v0 shortcuts
 
-- **SQLite, not Postgres.** The schema is small and single-user, and nothing needs a
-  vector column until step 7. `app/store.py` is the only file that touches SQL, so the
-  swap to Postgres + pgvector stays a one-file change.
 - **No job queue.** One paper at a time in a worker thread, as specced. Add Celery only
   if batch ingest ever becomes a real workflow.
 - **App runs on the host, not in a container.** It calls a host-local model server and

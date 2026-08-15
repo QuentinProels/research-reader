@@ -10,8 +10,13 @@ class Settings(BaseSettings):
     app_port: int = 8090
     data_dir: Path = Path("./data")
 
-    app_password_hash: str = ""
+    # A bcrypt hash contains '$', and `docker compose` interpolates '$VAR' inside every
+    # value of the .env it auto-loads -- whether or not the compose file uses it. Keeping
+    # the hash in a file sidesteps that entirely; .env holds the path, not the hash.
+    app_password_hash_file: Path = Path("./secrets/app_password.hash")
     session_secret: str = "change-me"
+
+    database_url: str = "postgresql://reader:reader@127.0.0.1:5433/reader"
 
     llm_base_url: str = "http://localhost:8084/v1"
     llm_api_key: str = ""
@@ -28,6 +33,13 @@ class Settings(BaseSettings):
     @property
     def papers_dir(self) -> Path:
         return self.data_dir / "papers"
+
+    @property
+    def password_hash(self) -> str:
+        """Empty means the password wall is off -- Cloudflare Access is then the only lock."""
+        if self.app_password_hash_file.exists():
+            return self.app_password_hash_file.read_text().strip()
+        return ""
 
 
 settings = Settings()

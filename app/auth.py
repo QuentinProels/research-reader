@@ -20,14 +20,14 @@ _serializer = URLSafeTimedSerializer(settings.session_secret, salt="reader-sessi
 
 
 def enabled() -> bool:
-    return bool(settings.app_password_hash)
+    return bool(settings.password_hash)
 
 
 def verify_password(password: str) -> bool:
     if not enabled():
         return True
     try:
-        return bcrypt.checkpw(password.encode(), settings.app_password_hash.encode())
+        return bcrypt.checkpw(password.encode(), settings.password_hash.encode())
     except ValueError:
         return False
 
