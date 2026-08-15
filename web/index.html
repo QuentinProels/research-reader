@@ -80,34 +80,45 @@ async function refreshStatus() {
 
 async function renderList() {
   const papers = await (await fetch("/api/papers")).json();
-  $("view").innerHTML = `
-    <div class="card">
-      <label>Upload a PDF</label>
-      <div class="row">
-        <div><input type="file" id="file" accept="application/pdf"></div>
-        <button id="up">Add</button>
-      </div>
-      <div class="hr"></div>
-      <label>…or paste an arXiv / PDF link</label>
-      <div class="row">
-        <div><input type="text" id="url" placeholder="https://arxiv.org/abs/2401.12345"></div>
-        <button id="go">Fetch</button>
-      </div>
-      <div class="err" id="ingestErr"></div>
-    </div>
-    <div class="card">${papers.length ? papers.map(paperRow).join("") :
-      '<div class="meta">Nothing yet. Add a paper above.</div>'}</div>`;
 
-  $("up").onclick = async () => {
-    const f = $("file").files[0];
-    if (!f) return;
-    const body = new FormData(); body.append("file", f);
-    await send("/api/upload", body);
-  };
-  $("go").onclick = async () => {
-    const body = new FormData(); body.append("url", $("url").value);
-    await send("/api/fetch", body);
-  };
+  // Build the ingest form exactly once. Rewriting it on every poll destroyed the
+  // input the user was typing into and stole focus mid-keystroke.
+  if (!$("ingest")) {
+    $("view").innerHTML = `
+      <div class="card" id="ingest">
+        <label>Upload a PDF</label>
+        <div class="row">
+          <div><input type="file" id="file" accept="application/pdf"></div>
+          <button id="up">Add</button>
+        </div>
+        <div class="hr"></div>
+        <label>…or paste an arXiv / PDF link</label>
+        <div class="row">
+          <div><input type="text" id="url" placeholder="https://arxiv.org/abs/2401.12345"></div>
+          <button id="go">Fetch</button>
+        </div>
+        <div class="err" id="ingestErr"></div>
+      </div>
+      <div class="card" id="papers"></div>`;
+
+    $("up").onclick = async () => {
+      const f = $("file").files[0];
+      if (!f) return;
+      const body = new FormData(); body.append("file", f);
+      await send("/api/upload", body);
+      $("file").value = "";
+    };
+    $("go").onclick = async () => {
+      const body = new FormData(); body.append("url", $("url").value);
+      if (await send("/api/fetch", body)) $("url").value = "";
+    };
+    $("url").addEventListener("keydown", (e) => { if (e.key === "Enter") $("go").click(); });
+  }
+
+  // Only the list is volatile, so only the list gets replaced.
+  $("papers").innerHTML = papers.length ? papers.map(paperRow).join("")
+    : '<div class="meta">Nothing yet. Add a paper above.</div>';
+
   document.querySelectorAll("[data-id]").forEach(el =>
     el.onclick = () => { openPaper = el.dataset.id; render(); });
   document.querySelectorAll("[data-cancel]").forEach(el =>
@@ -130,9 +141,10 @@ async function send(url, body) {
   const r = await fetch(url, { method: "POST", body });
   if (!r.ok) {
     $("ingestErr").textContent = (await r.json().catch(() => ({}))).detail || "Failed.";
-    return;
+    return false;
   }
   render();
+  return true;
 }
 
 function paperRow(p) {
