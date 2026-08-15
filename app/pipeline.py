@@ -27,11 +27,15 @@ def _reference_pattern(label: str) -> re.Pattern | None:
     return re.compile(rf"\b{prefix}\s*{re.escape(number)}\b", re.IGNORECASE)
 
 
-def _insert_captions(prose: str, figures: list[dict]) -> list[dict]:
+def _insert_captions(prose: str, figures: list[dict], placed: set[str]) -> list[dict]:
     """Split prose into segments, dropping each figure description in at the first
-    sentence that mentions it. Figures never referenced go at the end."""
+    sentence that mentions it.
+
+    `placed` is owned by the caller and spans the whole paper, not one section. It has
+    to: a paper refers back to Figure 1 in half its sections, and a per-section set
+    would re-read the full description every time.
+    """
     sentences = re.split(r"(?<=[.!?])\s+", prose.strip())
-    placed: set[str] = set()
     segments: list[dict] = []
     for sentence in sentences:
         if not sentence.strip():
@@ -49,12 +53,16 @@ def _insert_captions(prose: str, figures: list[dict]) -> list[dict]:
                     }
                 )
                 placed.add(figure["id"])
-    for figure in figures:
-        if figure["id"] not in placed and figure.get("caption"):
-            segments.append(
-                {"text": f"{figure['label']}. {figure['caption']}", "figure_id": figure["id"]}
-            )
     return segments
+
+
+def _trailing_captions(figures: list[dict], placed: set[str]) -> list[dict]:
+    """Figures the prose never referred to. Read once, after the last section."""
+    return [
+        {"text": f"{figure['label']}. {figure['caption']}", "figure_id": figure["id"]}
+        for figure in figures
+        if figure["id"] not in placed and figure.get("caption")
+    ]
 
 
 def run(paper_id: str, pdf_path: Path) -> None:
@@ -93,6 +101,7 @@ def run(paper_id: str, pdf_path: Path) -> None:
         store.set_status(paper_id, "reflowing", 0.40, "Cleaning up reading order")
         chapters: list[dict] = []
         segments: list[dict] = []
+        placed: set[str] = set()
         for index, section in enumerate(parsed.sections):
             store.set_status(
                 paper_id,
@@ -109,7 +118,8 @@ def run(paper_id: str, pdf_path: Path) -> None:
                     log.warning("reflow failed, using raw text: %s", exc)
                     cleaned_parts.append(block)
             chapters.append({"title": section.title, "segment_index": len(segments)})
-            segments.extend(_insert_captions("\n\n".join(cleaned_parts), figures))
+            segments.extend(_insert_captions("\n\n".join(cleaned_parts), figures, placed))
+        segments.extend(_trailing_captions(figures, placed))
 
         # 4. chunk + render
         store.set_status(paper_id, "synthesizing", 0.68, "Rendering audio")

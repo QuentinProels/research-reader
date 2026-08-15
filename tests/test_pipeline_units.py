@@ -6,7 +6,7 @@ The LLM and TTS calls are not tested here -- they need a live model server.
 import pytest
 
 from app import ingest
-from app.pipeline import _insert_captions, _reference_pattern
+from app.pipeline import _insert_captions, _reference_pattern, _trailing_captions
 from app.tts import chunk_text
 
 
@@ -47,25 +47,51 @@ class TestReferencePattern:
 class TestInsertCaptions:
     def test_caption_lands_after_the_referencing_sentence(self):
         figures = [{"id": "f1", "label": "Figure 1", "caption": "A rising curve."}]
-        segments = _insert_captions("First line. Figure 1 shows the trend. Then more.", figures)
+        segments = _insert_captions(
+            "First line. Figure 1 shows the trend. Then more.", figures, set()
+        )
         texts = [s["text"] for s in segments]
         assert texts[1].startswith("Figure 1 shows")
         assert texts[2] == "Figure 1. A rising curve."
         assert segments[2]["figure_id"] == "f1"
 
-    def test_unreferenced_figure_goes_to_the_end(self):
-        figures = [{"id": "f9", "label": "Figure 9", "caption": "An orphan chart."}]
-        segments = _insert_captions("No mention here at all.", figures)
-        assert segments[-1]["figure_id"] == "f9"
-
-    def test_figure_is_inserted_only_once(self):
+    def test_figure_is_inserted_only_once_within_a_section(self):
         figures = [{"id": "f1", "label": "Figure 1", "caption": "A curve."}]
-        segments = _insert_captions("Figure 1 here. And Figure 1 again.", figures)
+        segments = _insert_captions("Figure 1 here. And Figure 1 again.", figures, set())
         assert sum(1 for s in segments if s["figure_id"] == "f1") == 1
 
+    def test_figure_is_not_reread_in_a_later_section(self):
+        """Regression: `placed` used to be local to each call, so a paper that referred
+        back to Figure 1 in 27 sections narrated its full description 27 times."""
+        figures = [{"id": "f1", "label": "Figure 1", "caption": "A curve."}]
+        placed: set[str] = set()
+        sections = ["Figure 1 introduced here.", "Recall Figure 1.", "Figure 1 once more."]
+        total = sum(
+            1
+            for section in sections
+            for segment in _insert_captions(section, figures, placed)
+            if segment["figure_id"] == "f1"
+        )
+        assert total == 1
+
     def test_figure_without_a_caption_is_skipped(self):
-        segments = _insert_captions("Figure 1 here.", [{"id": "f1", "label": "Figure 1", "caption": ""}])
+        segments = _insert_captions(
+            "Figure 1 here.", [{"id": "f1", "label": "Figure 1", "caption": ""}], set()
+        )
         assert all(s["figure_id"] is None for s in segments)
+
+
+class TestTrailingCaptions:
+    def test_unreferenced_figure_is_read_once_at_the_end(self):
+        figures = [{"id": "f9", "label": "Figure 9", "caption": "An orphan chart."}]
+        assert [s["figure_id"] for s in _trailing_captions(figures, set())] == ["f9"]
+
+    def test_already_placed_figure_is_not_repeated(self):
+        figures = [{"id": "f1", "label": "Figure 1", "caption": "A curve."}]
+        assert _trailing_captions(figures, {"f1"}) == []
+
+    def test_figure_without_a_caption_is_not_appended(self):
+        assert _trailing_captions([{"id": "f1", "label": "Figure 1", "caption": ""}], set()) == []
 
 
 class TestIngest:
