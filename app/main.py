@@ -1,12 +1,11 @@
 import shutil
-import threading
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from app import auth, ingest, llm, pipeline, store, tts
+from app import auth, ingest, llm, store, tts
 from app.config import settings
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -65,9 +64,16 @@ def index():
 @app.get("/api/status")
 def api_status():
     llm_ok, llm_detail = llm.health()
+    workers = store.live_workers()
     return {
         "llm": {"ok": llm_ok, "detail": llm_detail},
         "tts": {"ok": tts.available(), "detail": "kokoro" if tts.available() else "weights missing"},
+        # Without this the failure mode is silent: papers queue up and nothing ever
+        # touches them, which from the UI is indistinguishable from "still working".
+        "worker": {
+            "ok": workers > 0,
+            "detail": f"{workers} running" if workers else "none — queue will not drain",
+        },
     }
 
 
@@ -123,7 +129,7 @@ async def api_upload(file: UploadFile):
                 )
             handle.write(block)
 
-    _start(paper_id, pdf_path)
+    _enqueue(paper_id, pdf_path)
     return {"id": paper_id}
 
 
@@ -136,15 +142,32 @@ def api_fetch(url: str = Form(...)):
     except ingest.IngestError as exc:
         store.update_paper(paper_id, status="failed", error=str(exc))
         raise HTTPException(400, str(exc)) from exc
-    _start(paper_id, pdf_path)
+    _enqueue(paper_id, pdf_path)
     return {"id": paper_id}
 
 
-def _start(paper_id: str, pdf_path: Path) -> None:
-    """One paper at a time, in a worker thread. No queue in v1 -- see spec section 3."""
-    threading.Thread(
-        target=pipeline.run, args=(paper_id, pdf_path), daemon=True, name=f"pipeline-{paper_id}"
-    ).start()
+@app.post("/api/papers/{paper_id}/cancel")
+def api_cancel(paper_id: str):
+    if not store.cancel_paper(paper_id):
+        raise HTTPException(409, "Only a paper still waiting in the queue can be cancelled.")
+    return {"ok": True}
+
+
+@app.delete("/api/papers/{paper_id}")
+def api_delete(paper_id: str):
+    if not store.delete_paper(paper_id):
+        raise HTTPException(404, "no such paper")
+    shutil.rmtree(settings.papers_dir / paper_id, ignore_errors=True)
+    return {"ok": True}
+
+
+def _enqueue(paper_id: str, pdf_path: Path) -> None:
+    """Record where the PDF landed and leave it 'queued'.
+
+    The API never runs the pipeline itself -- a separate worker process claims the row.
+    That is the whole point: restarting the API no longer kills work in flight.
+    """
+    store.update_paper(paper_id, pdf_path=str(pdf_path.relative_to(settings.data_dir)))
 
 
 app.mount("/figures", StaticFiles(directory=settings.papers_dir), name="figures")

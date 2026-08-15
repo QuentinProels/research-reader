@@ -50,8 +50,12 @@ head -c 18 /dev/urandom | base64 | tr -d '=+/' > secrets/pg_password   # then pa
 uv run python -c "import bcrypt,getpass;print(bcrypt.hashpw(getpass.getpass().encode(),bcrypt.gensalt()).decode())" > secrets/app_password.hash
 
 docker compose up -d          # postgres + pgvector on 127.0.0.1:5433
-uv run uvicorn app.main:app --host 127.0.0.1 --port 8090
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8090   # terminal 1: API
+uv run python -m app.worker                                # terminal 2: queue worker
 ```
+
+Both are needed. The API only enqueues; without a worker running, papers sit in
+`queued` forever — the UI says so rather than spinning silently.
 
 Tests: `uv run pytest`
 
@@ -81,9 +85,32 @@ Upload hardening, since the tunnel is public-facing: magic-byte check before any
 touches the file, a size cap, a page-count cap to catch decompression bombs, and a parse
 timeout.
 
-## Deliberate v0 shortcuts
+## The queue
 
-- **No job queue.** One paper at a time in a worker thread, as specced. Add Celery only
-  if batch ingest ever becomes a real workflow.
+Papers are processed by a separate worker process, not by the API. Queue state lives in
+Postgres; there is no Redis and no Celery. Jobs are minutes long and rare, the database
+was already here, and `SELECT … FOR UPDATE SKIP LOCKED` gives correct multi-worker
+claiming in a single statement. Adding a broker would have meant two more services to
+solve a problem that does not exist at single-user scale.
+
+Why a separate process rather than a thread in the API: when the pipeline ran in an API
+thread, restarting the API killed the job mid-flight and left the row frozen at its last
+progress value with nothing working on it and no error — indistinguishable, from the UI,
+from a job still running. Now the API can be restarted or crash while a paper keeps
+rendering.
+
+- **Crash recovery is lease-based.** Workers stamp `heartbeat_at` as they go. Anything
+  non-terminal whose heartbeat is older than `LEASE_SECONDS` (5 min) is assumed dead and
+  requeued, up to `MAX_ATTEMPTS` (3), after which it is failed with a real message.
+- **Shutdown is two-stage**, as in most job runners. First signal: finish the current
+  paper, then exit. Second: hand the job back to the queue and exit now.
+- **Restarted jobs start over.** There is no mid-pipeline checkpoint, so a requeued paper
+  re-parses and re-renders from the beginning. Worth adding only if interruptions become
+  common.
+- **Parallelism is by process.** Run more than one worker if you want it; claiming is
+  atomic. On this box one is usually right — llama-server serves a single model and
+  Kokoro is on CPU, so two workers mostly contend rather than go faster.
+
+## Deliberate v0 shortcuts
 - **App runs on the host, not in a container.** It calls a host-local model server and
   needs the host's CPU for TTS; containerising it buys nothing yet.

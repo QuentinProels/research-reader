@@ -32,8 +32,11 @@
   .hr { height:1px; background:var(--line); margin:16px 0; }
   .status { display:flex; gap:14px; font-size:.78rem; color:var(--muted); margin-bottom:16px; }
   .dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:5px; }
-  .paper { border-top:1px solid var(--line); padding:12px 0; cursor:pointer; }
+  .paper { border-top:1px solid var(--line); padding:12px 0; }
   .paper:first-child { border-top:0; }
+  .prow { display:flex; gap:10px; align-items:center; }
+  .act { flex:0 0 auto; color:var(--muted); }
+  .act:hover { border-color:var(--bad); color:var(--bad); }
   .paper h3 { margin:0 0 3px; font-size:.95rem; font-weight:600; }
   .meta { font-size:.76rem; color:var(--muted); }
   .bar { height:4px; background:var(--line); border-radius:2px; overflow:hidden; margin-top:7px; }
@@ -69,7 +72,7 @@ let openPaper = null, timer = null;
 async function refreshStatus() {
   try {
     const s = await (await fetch("/api/status")).json();
-    $("status").innerHTML = [["LLM", s.llm], ["TTS", s.tts]].map(([name, v]) =>
+    $("status").innerHTML = [["LLM", s.llm], ["TTS", s.tts], ["Worker", s.worker]].map(([name, v]) =>
       `<span><i class="dot" style="background:${v.ok ? "var(--ok)" : "var(--bad)"}"></i>${name}: ${esc(v.detail)}</span>`
     ).join("");
   } catch { $("status").textContent = "backend unreachable"; }
@@ -107,6 +110,19 @@ async function renderList() {
   };
   document.querySelectorAll("[data-id]").forEach(el =>
     el.onclick = () => { openPaper = el.dataset.id; render(); });
+  document.querySelectorAll("[data-cancel]").forEach(el =>
+    el.onclick = async (e) => {
+      e.stopPropagation();
+      await fetch(`/api/papers/${el.dataset.cancel}/cancel`, { method: "POST" });
+      render();
+    });
+  document.querySelectorAll("[data-del]").forEach(el =>
+    el.onclick = async (e) => {
+      e.stopPropagation();
+      if (!confirm("Delete this paper and its audio?")) return;
+      await fetch(`/api/papers/${el.dataset.del}`, { method: "DELETE" });
+      render();
+    });
 }
 
 async function send(url, body) {
@@ -120,13 +136,22 @@ async function send(url, body) {
 }
 
 function paperRow(p) {
-  const bar = p.status === "ready" || p.status === "failed" ? ""
+  const done = p.status === "ready" || p.status === "failed";
+  const queued = p.status === "queued";
+  const bar = done || queued ? ""
     : `<div class="bar"><span style="width:${(p.progress*100).toFixed(0)}%"></span></div>`;
   const line = p.status === "failed" ? `<span style="color:var(--bad)">failed — ${esc(p.error)}</span>`
     : p.status === "ready" ? `ready · ${clock(p.duration_s)} · ${p.figures.length} figures`
+    : queued ? `waiting — #${p.queue_position} in the queue`
     : `${esc(p.status)} — ${esc(p.detail)}`;
-  return `<div class="paper" data-id="${p.id}">
-    <h3>${esc(p.title)}</h3><div class="meta">${line}</div>${bar}</div>`;
+  const act = queued ? `<button class="chip act" data-cancel="${p.id}">cancel</button>`
+    : done ? `<button class="chip act" data-del="${p.id}">delete</button>` : "";
+  return `<div class="paper">
+    <div class="prow">
+      <div data-id="${p.id}" style="flex:1;min-width:0;cursor:pointer">
+        <h3>${esc(p.title)}</h3><div class="meta">${line}</div>${bar}
+      </div>${act}
+    </div></div>`;
 }
 
 async function renderPaper() {
@@ -186,8 +211,8 @@ async function renderPaper() {
 async function render() {
   clearInterval(timer);
   await (openPaper ? renderPaper() : renderList());
-  const live = document.querySelector(".bar");
-  if (live) timer = setInterval(render, 2500);
+  // keep polling while anything is queued (no bar yet) or actively processing
+  if (document.querySelector(".bar, [data-cancel]")) timer = setInterval(render, 2500);
 }
 
 refreshStatus(); setInterval(refreshStatus, 15000); render();
