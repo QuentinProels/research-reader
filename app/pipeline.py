@@ -146,6 +146,7 @@ def run(paper_id: str, pdf_path: Path) -> None:
 
         # 5. map chapter + figure markers onto real timestamps
         segment_starts = _segment_starts(segments, rendered, offsets)
+        _save_transcript(paper_id, chapters, segments, rendered, offsets, segment_starts)
         for chapter in chapters:
             chapter["start_s"] = segment_starts.get(chapter["segment_index"], 0.0)
             chapter.pop("segment_index")
@@ -178,6 +179,37 @@ def run(paper_id: str, pdf_path: Path) -> None:
     except Exception as exc:  # noqa: BLE001 -- the status row is the error channel
         log.error("pipeline failed for %s: %s", paper_id, traceback.format_exc())
         store.update_paper(paper_id, status="failed", detail="", error=str(exc))
+
+
+def _save_transcript(paper_id, chapters, segments, rendered, offsets, segment_starts) -> None:
+    """Store what is said and when, so a spoken question can be answered from the passage
+    the listener has actually reached."""
+    boundaries = sorted(
+        ((segment_starts.get(c["segment_index"], 0.0), c["title"]) for c in chapters),
+        key=lambda pair: pair[0],
+    )
+
+    def chapter_for(offset: float) -> str:
+        title = ""
+        for start, name in boundaries:
+            if start <= offset:
+                title = name
+            else:
+                break
+        return title
+
+    store.save_chunks(
+        paper_id,
+        [
+            {
+                "text": item["text"],
+                "start_s": offsets[index] if index < len(offsets) else 0.0,
+                "chapter_title": chapter_for(offsets[index] if index < len(offsets) else 0.0),
+                "figure_id": item["figure_id"],
+            }
+            for index, item in enumerate(rendered)
+        ],
+    )
 
 
 def _segment_starts(

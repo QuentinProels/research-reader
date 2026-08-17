@@ -85,7 +85,11 @@ def test_no_emojis_in_commit_messages():
 class TestTheCheckItself:
     """A rule nothing can violate is a rule nobody is following."""
 
-    @pytest.mark.parametrize("char", ["\U0001f600", "\U0001f680", "✅", "⚠", "⭐"])
+    # Written as escapes, not literals: this file is itself scanned, so spelling the
+    # examples out would make the checker fail on its own test data.
+    @pytest.mark.parametrize(
+        "char", ["\U0001f600", "\U0001f680", "\u2705", "\u26a0", "\u2b50"]
+    )
     def test_emoji_are_detected(self, char):
         assert _is_emoji(char)
 

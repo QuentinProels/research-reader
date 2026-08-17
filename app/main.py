@@ -1,3 +1,4 @@
+import json
 import shutil
 from pathlib import Path
 
@@ -5,7 +6,7 @@ from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from app import auth, ingest, llm, store, tts
+from app import auth, commands, ingest, llm, qa, store, stt, tts
 from app.config import settings
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -70,6 +71,10 @@ def api_status():
         "tts": {"ok": tts.available(), "detail": "kokoro" if tts.available() else "weights missing"},
         # Without this the failure mode is silent: papers queue up and nothing ever
         # touches them, which from the UI is indistinguishable from "still working".
+        "stt": {
+            "ok": stt.available(),
+            "detail": settings.stt_model if stt.available() else "faster-whisper missing",
+        },
         "worker": {
             "ok": workers > 0,
             "detail": f"{workers} running" if workers else "none — queue will not drain",
@@ -144,6 +149,94 @@ def api_fetch(url: str = Form(...)):
         raise HTTPException(400, str(exc)) from exc
     _enqueue(paper_id, pdf_path)
     return {"id": paper_id}
+
+
+@app.post("/api/papers/{paper_id}/listen")
+async def api_listen(
+    paper_id: str,
+    audio: UploadFile,
+    position: float = Form(0.0),
+    history: str = Form("[]"),
+):
+    """One push-to-talk utterance: transcribe it, then either act on it or answer it.
+
+    Navigation is resolved here rather than in the browser because the chapter
+    boundaries live in the database, and returning a concrete seek target keeps the
+    player dumb.
+    """
+    paper = store.get_paper(paper_id)
+    if not paper:
+        raise HTTPException(404, "no such paper")
+
+    clip = settings.papers_dir / paper_id / "question.wav"
+    clip.parent.mkdir(parents=True, exist_ok=True)
+    clip.write_bytes(await audio.read())
+
+    try:
+        transcript = stt.transcribe(clip)
+    except stt.STTUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    finally:
+        clip.unlink(missing_ok=True)
+
+    if not transcript.strip():
+        return {"transcript": "", "action": "none", "say": "I did not catch that."}
+
+    command = commands.parse(transcript)
+    reply: dict = {"transcript": transcript, "kind": command.kind}
+
+    if command.kind in ("back", "forward"):
+        delta = command.seconds * (1 if command.kind == "forward" else -1)
+        reply |= {"action": "seek", "position": max(position + delta, 0.0),
+                  "say": f"{'Forward' if delta > 0 else 'Back'} {int(abs(delta))} seconds."}
+    elif command.kind == "repeat_section":
+        chapter = store.chapter_at(paper_id, position)
+        reply |= {"action": "seek", "position": (chapter or {}).get("start_s", 0.0),
+                  "say": f"Repeating {(chapter or {}).get('title', 'this section')}."}
+    elif command.kind in ("next_section", "previous_section"):
+        step = 1 if command.kind == "next_section" else -1
+        chapter = store.adjacent_chapter(paper_id, position, step)
+        if chapter is None:
+            reply |= {"action": "none",
+                      "say": "That is the last section." if step > 0 else "This is the first section."}
+        else:
+            reply |= {"action": "seek", "position": chapter["start_s"],
+                      "say": chapter["title"]}
+    elif command.kind == "show_figure":
+        match = next(
+            (f for f in paper["figures"] if f["label"].lower() == (command.figure or "").lower()),
+            None,
+        )
+        if match is None:
+            reply |= {"action": "none", "say": f"I could not find {command.figure}."}
+        else:
+            reply |= {"action": "show_figure", "figure": match,
+                      "say": match.get("caption") or match["label"]}
+    elif command.kind in ("pause", "resume"):
+        reply |= {"action": command.kind, "say": ""}
+    else:
+        try:
+            history_turns = json.loads(history)
+        except json.JSONDecodeError:
+            history_turns = []
+        answered = qa.answer(paper_id, transcript, position, history_turns)
+        reply |= {"action": "answer", "say": answered["text"],
+                  "reasoned": answered["reasoned"], "chapter": answered["chapter"]}
+    return reply
+
+
+@app.post("/api/speak")
+def api_speak(text: str = Form(...)):
+    """Render a short spoken reply. Kept separate so the browser can show the text the
+    instant it arrives and start the audio only when it is ready."""
+    if not tts.available():
+        raise HTTPException(503, "TTS weights are missing")
+    clip = settings.data_dir / "replies"
+    clip.mkdir(parents=True, exist_ok=True)
+    path = clip / f"{abs(hash(text)) % (10**12)}.wav"
+    if not path.exists():
+        tts.render(tts.chunk_text(text), path)
+    return FileResponse(path, media_type="audio/wav")
 
 
 @app.post("/api/papers/{paper_id}/cancel")

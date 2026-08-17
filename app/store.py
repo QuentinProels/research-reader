@@ -14,7 +14,7 @@ All SQL in the project lives in this module.
 
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from psycopg.rows import dict_row
@@ -65,15 +65,28 @@ CREATE TABLE IF NOT EXISTS workers (
     last_seen TIMESTAMPTZ NOT NULL
 );
 
--- Step 7 lands here: chunk text + embedding, one row per retrievable passage.
+-- One row per narrated segment: the transcript of the audio, with the timestamp it is
+-- spoken at. This is what "what did that mean" retrieves against, and what "repeat that
+-- section" seeks by. The embedding column stays null until step 7 fills it.
 CREATE TABLE IF NOT EXISTS chunks (
-    id         BIGSERIAL PRIMARY KEY,
-    paper_id   TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
-    ordinal    INTEGER NOT NULL,
-    text       TEXT NOT NULL,
-    embedding  vector(768),
+    id            BIGSERIAL PRIMARY KEY,
+    paper_id      TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+    ordinal       INTEGER NOT NULL,
+    text          TEXT NOT NULL,
+    start_s       DOUBLE PRECISION NOT NULL DEFAULT 0,
+    chapter_title TEXT NOT NULL DEFAULT '',
+    figure_id     TEXT,
+    embedding     vector(768),
     UNIQUE (paper_id, ordinal)
 );
+
+-- CREATE TABLE IF NOT EXISTS does nothing to a table that already exists, so columns
+-- added after the first deployment need their own statements.
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS start_s       DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS chapter_title TEXT NOT NULL DEFAULT '';
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS figure_id     TEXT;
+
+CREATE INDEX IF NOT EXISTS chunks_position_idx ON chunks (paper_id, start_s);
 """
 
 _JSON_COLUMNS = ("chapters", "figures")
@@ -113,7 +126,7 @@ def create_paper(title: str, source: str) -> str:
     with _conn() as connection:
         connection.execute(
             "INSERT INTO papers (id, title, source, status, created_at) VALUES (%s, %s, %s, %s, %s)",
-            (paper_id, title, source, "queued", datetime.now(timezone.utc)),
+            (paper_id, title, source, "queued", datetime.now(UTC)),
         )
     return paper_id
 
@@ -335,3 +348,77 @@ def live_workers(within_seconds: int = 60) -> int:
             (within_seconds,),
         ).fetchone()
     return row["n"]
+
+
+# ---------------------------------------------------------------------------- chunks
+
+
+def save_chunks(paper_id: str, chunks: list[dict]) -> None:
+    """Record the narration transcript with timestamps, replacing any earlier run."""
+    with _conn() as connection:
+        connection.execute("DELETE FROM chunks WHERE paper_id = %s", (paper_id,))
+        if not chunks:
+            return
+        with connection.cursor() as cursor:
+            cursor.executemany(
+                "INSERT INTO chunks (paper_id, ordinal, text, start_s, chapter_title, figure_id)"
+                " VALUES (%s, %s, %s, %s, %s, %s)",
+                [
+                    (
+                        paper_id,
+                        index,
+                        chunk["text"],
+                        chunk["start_s"],
+                        chunk.get("chapter_title", ""),
+                        chunk.get("figure_id"),
+                    )
+                    for index, chunk in enumerate(chunks)
+                ],
+            )
+
+
+def chunks_around(paper_id: str, position_s: float, window_s: float = 180.0) -> list[dict]:
+    """The narration either side of where the listener is.
+
+    Reaches backwards further than forwards: a question is nearly always about something
+    just heard, and the text ahead has not been heard yet.
+    """
+    with _conn() as connection:
+        return connection.execute(
+            """
+            SELECT text, start_s, chapter_title, figure_id FROM chunks
+            WHERE paper_id = %s AND start_s BETWEEN %s AND %s
+            ORDER BY start_s
+            """,
+            (paper_id, position_s - window_s, position_s + window_s / 3),
+        ).fetchall()
+
+
+def chapter_at(paper_id: str, position_s: float) -> dict | None:
+    """Which chapter is playing, and where it starts -- for "repeat that section"."""
+    paper = get_paper(paper_id)
+    if not paper:
+        return None
+    current = None
+    for chapter in paper["chapters"]:
+        if chapter.get("start_s", 0) <= position_s:
+            current = chapter
+        else:
+            break
+    return current
+
+
+def adjacent_chapter(paper_id: str, position_s: float, direction: int) -> dict | None:
+    """The next or previous chapter, for section navigation."""
+    paper = get_paper(paper_id)
+    if not paper or not paper["chapters"]:
+        return None
+    chapters = sorted(paper["chapters"], key=lambda c: c.get("start_s", 0))
+    index = 0
+    for position, chapter in enumerate(chapters):
+        if chapter.get("start_s", 0) <= position_s:
+            index = position
+    target = index + direction
+    if target < 0 or target >= len(chapters):
+        return None
+    return chapters[target]

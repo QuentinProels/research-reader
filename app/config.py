@@ -26,9 +26,16 @@ class Settings(BaseSettings):
     kokoro_voices_path: Path = Path("./models/voices-v1.0.bin")
     kokoro_voice: str = "af_heart"
 
+    # faster-whisper on CPU: CTranslate2 has no ROCm backend, and both GPUs hold the 35B.
+    stt_model: str = "tiny.en"  # measured 1.8s vs 5.4s for small.en; errors are formatting, not meaning
+
     max_upload_bytes: int = 100 * 1024 * 1024
     max_pages: int = 500
     parse_timeout_seconds: int = 120
+
+    @property
+    def models_dir(self) -> Path:
+        return self.kokoro_model_path.parent
 
     @property
     def papers_dir(self) -> Path:

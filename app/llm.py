@@ -95,6 +95,13 @@ def _chat(
     return response.json()["choices"][0]["message"]["content"].strip()
 
 
+def chat(
+    messages: list[dict], max_tokens: int = 2048, temperature: float = 0.3, thinking: bool = False
+) -> str:
+    """Public entry point for callers that build their own message list."""
+    return _chat(messages, max_tokens=max_tokens, temperature=temperature, thinking=thinking)
+
+
 def health() -> tuple[bool, str]:
     """Is llama-server reachable and is our API key accepted?"""
     try:
