@@ -8,6 +8,10 @@ Equations are described qualitatively ("the loss is a weighted sum of a reconstr
 error and a KL divergence term"), never read symbol by symbol. Read aloud, symbols are
 unparseable by ear.
 
+Working on this with an AI agent? Read [ai.md](ai.md) first: it covers the conventions
+that are not obvious from the code, and the ways this machine differs from what the
+original spec assumed.
+
 ## Status
 
 v0.1 — build-order steps 1–5 of 7. Ingest, parse, caption, reflow, render, play.
