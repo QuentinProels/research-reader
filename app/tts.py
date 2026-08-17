@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from app import speech
 from app.config import settings
 
 SAMPLE_RATE = 24000
@@ -41,8 +42,13 @@ def available() -> bool:
 
 
 def chunk_text(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
-    """Split into TTS-sized segments on sentence boundaries, never mid-sentence."""
-    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    """Split into TTS-sized segments on sentence boundaries, never mid-sentence.
+
+    Normalising first is deliberate: the split below treats every ". " as a sentence
+    end, so "e.g. attention" was cut in two and got a 0.35s gap inserted between the
+    halves, on top of the one Kokoro already inserted for the period itself.
+    """
+    sentences = re.split(r"(?<=[.!?])\s+", speech.normalize(text))
     chunks: list[str] = []
     current = ""
     for sentence in sentences:
@@ -64,7 +70,10 @@ def chunk_text(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
 
 
 def synthesize(text: str) -> np.ndarray:
-    samples, _ = _kokoro().create(text, voice=settings.kokoro_voice, speed=1.0, lang="en-us")
+    # Idempotent, so it is safe that chunk_text has usually normalised this already.
+    samples, _ = _kokoro().create(
+        speech.normalize(text), voice=settings.kokoro_voice, speed=1.0, lang="en-us"
+    )
     return np.asarray(samples, dtype=np.float32)
 
 
