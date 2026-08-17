@@ -5,12 +5,18 @@ always about the passage just heard, so the transcript around the current playba
 answers most of them without any search at all. Step 7 adds a vector fallback for the
 rest; until then, an unanswerable question says so rather than inventing something.
 
-Depth is adaptive. Reasoning measured 32s against 1s for the same output on mechanical
-work, so switching it on for everything would make every answer feel broken, and off for
-everything would make "why does this work" shallow. The classifier below is deliberately
-a cheap heuristic rather than another model call: it runs in microseconds, it is testable,
-and when it is wrong the cost is an answer that is faster or slower than ideal, not one
-that is wrong.
+Answers do not use the model's reasoning mode, and that is a measured decision rather
+than a latency compromise. Asked the same grounded question over the same passage, the
+fast path answered in 4s and the reasoning path in 53s, and the fast answer was the more
+specific of the two. When the answer is already in the passage the task is reading
+comprehension, not deduction, so there is nothing for reasoning to do -- the same finding
+as the reflow pass, which was 32x slower for byte-identical output.
+
+Reasoning also has a failure mode here: it consumed an entire 800-token budget on its own
+thinking and returned an empty answer after 48 seconds of silence.
+
+This should be revisited when step 7 adds synthesis across retrieved passages, which is a
+genuinely different task shape. Measure it again then rather than assuming either way.
 """
 
 import logging
@@ -22,18 +28,7 @@ log = logging.getLogger(__name__)
 
 MAX_HISTORY_TURNS = 6
 MAX_CONTEXT_CHARS = 6000
-
-# Questions that need the model to actually reason, rather than look something up.
-_REASONING_CUES = (
-    "why", "how come", "how does", "how do", "how is", "what makes", "explain",
-    "justify", "compare", "difference between", "trade-off", "tradeoff", "implication",
-    "intuition", "reason", "prove", "derive", "so what", "does that mean", "follow from",
-)
-# Questions answered by pointing at a fact in the passage just heard.
-_LOOKUP_CUES = (
-    "what is", "what are", "what was", "what were", "who", "when", "where",
-    "how many", "how much", "define", "what does that stand for", "which",
-)
+ANSWER_MAX_TOKENS = 800
 
 ANSWER_SYSTEM = """You answer a listener's spoken question about a research paper they are
 part-way through hearing narrated aloud.
@@ -47,17 +42,6 @@ Rules:
 - If the passage does not contain the answer, say so in one sentence and say what part of
   the paper would have it. Never invent a number, a result, or a citation.
 - Do not restate the question before answering it."""
-
-
-def needs_reasoning(question: str) -> bool:
-    """Should this question get the slow, thinking-enabled path?"""
-    text = question.lower().strip()
-    if any(cue in text for cue in _REASONING_CUES):
-        return True
-    if any(text.startswith(cue) for cue in _LOOKUP_CUES):
-        return False
-    # An unclassified question that is long enough to be involved probably is.
-    return len(text.split()) > 12
 
 
 def _context_for(paper_id: str, position_s: float) -> tuple[str, str]:
@@ -84,14 +68,12 @@ def answer(
         raise ValueError("no such paper")
 
     passage, chapter = _context_for(paper_id, position_s)
-    deep = needs_reasoning(question)
 
     if not passage:
         return {
             "text": "I do not have the narration text for this paper yet, so I cannot "
             "answer questions about it. Re-processing it will fix that.",
             "chapter": "",
-            "reasoned": False,
             "grounded": False,
         }
 
@@ -111,11 +93,14 @@ def answer(
         }
     )
 
-    text = llm.chat(messages, max_tokens=800, temperature=0.3, thinking=deep)
+    text = _strip_reasoning(
+        llm.chat(messages, max_tokens=ANSWER_MAX_TOKENS, temperature=0.3, thinking=False)
+    )
+    if not text:
+        log.warning("empty answer for %r", question[:60])
     return {
-        "text": _strip_reasoning(text),
+        "text": text or "I could not put an answer together for that one. Try rephrasing it.",
         "chapter": chapter,
-        "reasoned": deep,
         "grounded": True,
     }
 

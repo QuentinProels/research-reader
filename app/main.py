@@ -221,7 +221,7 @@ async def api_listen(
             history_turns = []
         answered = qa.answer(paper_id, transcript, position, history_turns)
         reply |= {"action": "answer", "say": answered["text"],
-                  "reasoned": answered["reasoned"], "chapter": answered["chapter"]}
+                  "chapter": answered["chapter"]}
     return reply
 
 
