@@ -42,7 +42,17 @@ Rules:
 
 
 class LLMError(RuntimeError):
-    pass
+    """The model server answered, but not usefully. Callers may degrade gracefully."""
+
+
+class LLMUnavailable(LLMError):
+    """The model server could not be reached at all.
+
+    Distinct from LLMError because the right response is different: a single bad
+    response can be worked around by falling back to raw text, but an unreachable
+    server means every remaining call in the paper will fail too, and narrating a whole
+    paper from unreflowed text is worse than waiting. The worker requeues these.
+    """
 
 
 def _headers() -> dict[str, str]:
@@ -69,10 +79,17 @@ def _chat(
         "temperature": temperature,
         "chat_template_kwargs": {"enable_thinking": thinking},
     }
-    with httpx.Client(timeout=_TIMEOUT) as client:
-        response = client.post(
-            f"{settings.llm_base_url}/chat/completions", json=payload, headers=_headers()
-        )
+    try:
+        with httpx.Client(timeout=_TIMEOUT) as client:
+            response = client.post(
+                f"{settings.llm_base_url}/chat/completions", json=payload, headers=_headers()
+            )
+    except httpx.HTTPError as exc:
+        # Connection refused, disconnects mid-response, timeouts: the server is down or
+        # restarting. Distinguish it so the job can be retried rather than failed.
+        raise LLMUnavailable(f"cannot reach llama-server at {settings.llm_base_url}: {exc}") from exc
+    if response.status_code in (502, 503, 504):
+        raise LLMUnavailable(f"llama-server returned {response.status_code}")
     if response.status_code != 200:
         raise LLMError(f"llama-server returned {response.status_code}: {response.text[:300]}")
     return response.json()["choices"][0]["message"]["content"].strip()

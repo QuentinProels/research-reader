@@ -165,3 +165,70 @@ class TestWorkerLiveness:
         store.worker_seen("w1")
         store.worker_gone("w1")
         assert store.live_workers() == 0
+
+
+class TestOutageRetry:
+    """A llama-server restart used to permanently fail every paper in flight."""
+
+    def test_an_outage_puts_the_job_back_without_burning_an_attempt(self):
+        paper_id = store.create_paper("Caught in a restart", "upload")
+        store.claim_next_job("w1")
+        assert store.get_paper(paper_id)["attempts"] == 1
+
+        assert store.requeue_after_outage(paper_id, "Model server unavailable") is True
+        paper = store.get_paper(paper_id)
+        assert paper["status"] == "queued"
+        assert paper["attempts"] == 0, "an outage is not the paper's fault"
+        assert paper["outage_retries"] == 1
+
+    def test_a_backed_off_job_is_not_claimed_before_its_time(self):
+        paper_id = store.create_paper("Waiting out the backoff", "upload")
+        store.claim_next_job("w1")
+        store.requeue_after_outage(paper_id, "down")
+        assert store.claim_next_job("w2") is None, "backoff must not spin on a dead server"
+
+    def test_it_is_claimed_once_the_backoff_expires(self):
+        paper_id = store.create_paper("Ready to retry", "upload")
+        store.claim_next_job("w1")
+        store.requeue_after_outage(paper_id, "down")
+        with store._conn() as c:
+            c.execute(
+                "UPDATE papers SET next_attempt_at = now() - interval '1 second' WHERE id = %s",
+                (paper_id,),
+            )
+        assert store.claim_next_job("w2")["id"] == paper_id
+
+    def test_backoff_grows_between_retries(self):
+        paper_id = store.create_paper("Server really is down", "upload")
+        delays = []
+        for _ in range(3):
+            store.claim_next_job("w1")
+            store.requeue_after_outage(paper_id, "down")
+            with store._conn() as c:
+                row = c.execute(
+                    "SELECT extract(epoch from next_attempt_at - now()) AS s FROM papers "
+                    "WHERE id = %s",
+                    (paper_id,),
+                ).fetchone()
+            delays.append(row["s"])
+            with store._conn() as c:
+                c.execute("UPDATE papers SET next_attempt_at = now() WHERE id = %s", (paper_id,))
+        assert delays[0] < delays[1] < delays[2]
+
+    def test_it_eventually_gives_up(self):
+        paper_id = store.create_paper("Hopeless", "upload")
+        with store._conn() as c:
+            c.execute(
+                "UPDATE papers SET outage_retries = %s WHERE id = %s",
+                (store.MAX_OUTAGE_RETRIES, paper_id),
+            )
+        assert store.requeue_after_outage(paper_id, "down") is False
+
+    def test_finishing_clears_the_outage_history(self):
+        paper_id = store.create_paper("Recovered", "upload")
+        store.claim_next_job("w1")
+        store.requeue_after_outage(paper_id, "down")
+        store.clear_outage_backoff(paper_id)
+        paper = store.get_paper(paper_id)
+        assert paper["outage_retries"] == 0
+        assert paper["next_attempt_at"] is None

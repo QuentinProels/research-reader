@@ -26,6 +26,8 @@ from app.config import settings
 TERMINAL_STATUSES = ("ready", "failed")
 MAX_ATTEMPTS = 3
 LEASE_SECONDS = 300  # a single vision call or reflow block can legitimately take minutes
+MAX_OUTAGE_RETRIES = 8  # roughly two hours of backoff before giving up on a dead server
+OUTAGE_BACKOFF_SECONDS = (30, 60, 120, 300, 600, 900, 1800, 1800)
 
 SCHEMA = """
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -51,6 +53,8 @@ ALTER TABLE papers ADD COLUMN IF NOT EXISTS claimed_by   TEXT;
 ALTER TABLE papers ADD COLUMN IF NOT EXISTS claimed_at   TIMESTAMPTZ;
 ALTER TABLE papers ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ;
 ALTER TABLE papers ADD COLUMN IF NOT EXISTS attempts     INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS outage_retries  INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS papers_created_at_idx ON papers (created_at DESC);
 -- The claim query's hot path: oldest queued row.
@@ -197,6 +201,7 @@ def claim_next_job(worker_id: str) -> dict[str, Any] | None:
             WHERE id = (
                 SELECT id FROM papers
                 WHERE status = 'queued'
+                  AND (next_attempt_at IS NULL OR next_attempt_at <= now())
                 ORDER BY created_at
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
@@ -219,6 +224,52 @@ def release_job(paper_id: str) -> None:
             "UPDATE papers SET status = 'queued', claimed_by = NULL, claimed_at = NULL, "
             "heartbeat_at = NULL, progress = 0, detail = 'Requeued after worker shutdown' "
             "WHERE id = %s AND status NOT IN ('ready', 'failed')",
+            (paper_id,),
+        )
+
+
+def requeue_after_outage(paper_id: str, reason: str) -> bool:
+    """Put a job back because the model server was unreachable, not because the paper
+    is bad. Returns False once the backoff schedule is exhausted, at which point the
+    caller should fail it for real.
+
+    The attempt is not counted against MAX_ATTEMPTS: that budget exists for jobs that
+    kill their worker, and an outage is nobody's fault but the model server's.
+    """
+    with _conn() as connection:
+        row = connection.execute(
+            "SELECT outage_retries FROM papers WHERE id = %s", (paper_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        retries = row["outage_retries"]
+        if retries >= MAX_OUTAGE_RETRIES:
+            return False
+        delay = OUTAGE_BACKOFF_SECONDS[min(retries, len(OUTAGE_BACKOFF_SECONDS) - 1)]
+        connection.execute(
+            """
+            UPDATE papers SET
+                status          = 'queued',
+                claimed_by      = NULL,
+                claimed_at      = NULL,
+                heartbeat_at    = NULL,
+                progress        = 0,
+                attempts        = GREATEST(attempts - 1, 0),
+                outage_retries  = outage_retries + 1,
+                next_attempt_at = now() + make_interval(secs => %s),
+                detail          = %s
+            WHERE id = %s
+            """,
+            (delay, f"{reason}; retrying in {delay // 60 or 1} min", paper_id),
+        )
+    return True
+
+
+def clear_outage_backoff(paper_id: str) -> None:
+    """A job that got going again should not carry its outage history forward."""
+    with _conn() as connection:
+        connection.execute(
+            "UPDATE papers SET outage_retries = 0, next_attempt_at = NULL WHERE id = %s",
             (paper_id,),
         )
 

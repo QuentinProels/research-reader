@@ -84,6 +84,8 @@ def run(paper_id: str, pdf_path: Path) -> None:
             )
             try:
                 caption = llm.caption_figure(figure.image_path, figure.printed_caption)
+            except llm.LLMUnavailable:
+                raise  # the whole job should retry, not lose every figure description
             except llm.LLMError as exc:
                 log.warning("caption failed for %s: %s", figure.id, exc)
                 caption = figure.printed_caption
@@ -114,6 +116,8 @@ def run(paper_id: str, pdf_path: Path) -> None:
                 block = section.text[start : start + REFLOW_BUDGET_CHARS]
                 try:
                     cleaned_parts.append(llm.reflow(block))
+                except llm.LLMUnavailable:
+                    raise  # narrating a whole paper from unreflowed text is worse
                 except llm.LLMError as exc:
                     log.warning("reflow failed, using raw text: %s", exc)
                     cleaned_parts.append(block)
@@ -167,6 +171,10 @@ def run(paper_id: str, pdf_path: Path) -> None:
             figures=figures,
             error=None,
         )
+    except llm.LLMUnavailable:
+        # Not this paper's fault. The worker decides whether to requeue or give up.
+        log.warning("model server unreachable during %s; handing back to the worker", paper_id)
+        raise
     except Exception as exc:  # noqa: BLE001 -- the status row is the error channel
         log.error("pipeline failed for %s: %s", paper_id, traceback.format_exc())
         store.update_paper(paper_id, status="failed", detail="", error=str(exc))

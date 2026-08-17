@@ -21,7 +21,7 @@ import threading
 import time
 from pathlib import Path
 
-from app import pipeline, store
+from app import llm, pipeline, store
 from app.config import settings
 
 log = logging.getLogger("worker")
@@ -102,8 +102,24 @@ def run_forever() -> None:
                     job["id"], status="failed", error=f"Source PDF is missing at {pdf_path}"
                 )
             else:
-                pipeline.run(job["id"], pdf_path)  # records its own failure in the row
-                log.info("finished %s", job["id"])
+                try:
+                    pipeline.run(job["id"], pdf_path)  # records its own failure in the row
+                    store.clear_outage_backoff(job["id"])
+                    log.info("finished %s", job["id"])
+                except llm.LLMUnavailable as exc:
+                    # The model server is down or restarting. The paper is fine, so put
+                    # it back rather than burning it -- a llama-server restart used to
+                    # permanently fail every paper in flight.
+                    if store.requeue_after_outage(job["id"], "Model server unavailable"):
+                        log.warning("requeued %s: %s", job["id"], exc)
+                    else:
+                        store.update_paper(
+                            job["id"],
+                            status="failed",
+                            detail="",
+                            error=f"Model server stayed unreachable: {exc}",
+                        )
+                        log.error("gave up on %s: %s", job["id"], exc)
             _current_paper = None
     finally:
         _current_paper = None
