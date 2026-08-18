@@ -87,7 +87,29 @@ ALTER TABLE chunks ADD COLUMN IF NOT EXISTS chapter_title TEXT NOT NULL DEFAULT 
 ALTER TABLE chunks ADD COLUMN IF NOT EXISTS figure_id     TEXT;
 
 CREATE INDEX IF NOT EXISTS chunks_position_idx ON chunks (paper_id, start_s);
+
+-- Single row. Settings live server-side rather than in browser storage so that a choice
+-- made at a desk is already in force on the phone in the car, which is the device least
+-- convenient to configure.
+CREATE TABLE IF NOT EXISTS settings (
+    id      BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+    values  JSONB NOT NULL DEFAULT '{}'::jsonb
+);
 """
+
+# Every default here is a measurement or a stated preference, not a guess. Changing one
+# must change behaviour: a toggle that does nothing is worse than no toggle.
+DEFAULT_SETTINGS = {
+    "activation": "both",          # tap | handsfree | both
+    "vad_sensitivity": "medium",   # low | medium | high
+    "echo_rejection": True,        # discard triggers that match the narration transcript
+    "answer_depth": "fast",        # fast | thorough  (thorough measured 13x slower, no better)
+    "stt_model": "tiny.en",        # tiny.en | base.en | small.en
+    "keep_screen_awake": True,     # Wake Lock, so a mounted phone does not sleep mid-drive
+    "speak_answers": True,         # read answers aloud as well as showing them
+    "auto_resume": True,           # resume narration once an answer finishes
+    "offline_download": False,     # cache the audio for dead spots
+}
 
 _JSON_COLUMNS = ("chapters", "figures")
 _pool: ConnectionPool | None = None
@@ -422,3 +444,26 @@ def adjacent_chapter(paper_id: str, position_s: float, direction: int) -> dict |
     if target < 0 or target >= len(chapters):
         return None
     return chapters[target]
+
+
+# -------------------------------------------------------------------------- settings
+
+
+def get_settings() -> dict:
+    """Stored settings merged over the defaults, so a new key needs no migration."""
+    with _conn() as connection:
+        row = connection.execute("SELECT values FROM settings WHERE id IS TRUE").fetchone()
+    return {**DEFAULT_SETTINGS, **((row or {}).get("values") or {})}
+
+
+def save_settings(values: dict) -> dict:
+    """Persist only keys that exist, so an unknown field cannot smuggle itself in."""
+    clean = {k: v for k, v in values.items() if k in DEFAULT_SETTINGS}
+    merged = {**get_settings(), **clean}
+    with _conn() as connection:
+        connection.execute(
+            "INSERT INTO settings (id, values) VALUES (TRUE, %s) "
+            "ON CONFLICT (id) DO UPDATE SET values = EXCLUDED.values",
+            (Jsonb(merged),),
+        )
+    return merged
