@@ -16,6 +16,34 @@ log = logging.getLogger(__name__)
 
 REFLOW_BUDGET_CHARS = 6000  # per LLM call; well inside the 250k context, keeps latency sane
 
+# The reflow model occasionally answers about the text instead of returning it, usually
+# when handed a block that is mostly a table or a formula and contains little prose. The
+# reply then gets narrated as though it were the paper: one recording says "As there is
+# no substantive prose to clean, summarize, or read aloud, no output can be generated"
+# in the middle of a section. Rare -- 2 chunks in 2244 -- but it is read aloud in the
+# narrator's voice, so it is worth catching.
+_REFUSAL_MARKERS = (
+    "no substantive prose",
+    "no output can be generated",
+    "nothing to clean",
+    "there is no prose",
+    "cannot be generated",
+    "as an ai",
+    "i cannot",
+    "no text was provided",
+    "the provided text contains no",
+)
+
+
+def _is_refusal(text: str) -> bool:
+    """Did the model talk about the passage instead of returning it?
+
+    Only short replies are considered. A long passage that happens to contain one of
+    these phrases is almost certainly the paper discussing something, not a refusal.
+    """
+    stripped = text.strip().lower()
+    return len(stripped) < 400 and any(marker in stripped for marker in _REFUSAL_MARKERS)
+
 
 def _reference_pattern(label: str) -> re.Pattern | None:
     """Match in-text references to 'Figure 3' / 'Fig. 3' / 'Table 2'."""
@@ -115,7 +143,14 @@ def run(paper_id: str, pdf_path: Path) -> None:
             for start in range(0, len(section.text), REFLOW_BUDGET_CHARS):
                 block = section.text[start : start + REFLOW_BUDGET_CHARS]
                 try:
-                    cleaned_parts.append(llm.reflow(block))
+                    cleaned = llm.reflow(block)
+                    if _is_refusal(cleaned):
+                        # Drop it rather than substituting the raw block: these blocks are
+                        # the ones with no readable prose in them, which is why the model
+                        # balked, so the raw text would narrate no better.
+                        log.info("reflow refused a block in %s, dropping it", paper_id)
+                        continue
+                    cleaned_parts.append(cleaned)
                 except llm.LLMUnavailable:
                     raise  # narrating a whole paper from unreflowed text is worse
                 except llm.LLMError as exc:
