@@ -62,6 +62,26 @@
   .turn.reader { align-self:flex-start; border:1px solid var(--line); }
   .turn .who { display:block; font-size:.68rem; color:var(--muted); margin-bottom:3px; }
   .thinking { color:var(--muted); font-style:italic; }
+  .settings { margin-bottom:16px; }
+  .settings summary { cursor:pointer; font-size:.82rem; color:var(--muted); padding:4px 0; }
+  .srow { display:flex; align-items:center; justify-content:space-between; gap:12px;
+    padding:9px 0; border-top:1px solid var(--line); }
+  .srow:first-of-type { border-top:0; }
+  .srow label { margin:0; font-size:.86rem; color:var(--ink); flex:1; }
+  .srow .why { display:block; font-size:.72rem; color:var(--muted); margin-top:2px; }
+  .srow select { padding:6px 9px; border-radius:8px; border:1px solid var(--line);
+    background:var(--bg); color:var(--ink); font-size:.82rem; }
+  .sw { position:relative; width:42px; height:24px; flex:0 0 auto; }
+  .sw input { opacity:0; width:0; height:0; }
+  .sw span { position:absolute; inset:0; background:var(--line); border-radius:24px;
+    transition:.2s; cursor:pointer; }
+  .sw span:before { content:""; position:absolute; height:18px; width:18px; left:3px;
+    bottom:3px; background:#fff; border-radius:50%; transition:.2s; }
+  .sw input:checked + span { background:var(--accent); }
+  .sw input:checked + span:before { transform:translateX(18px); }
+  .mic { display:inline-block; width:8px; height:8px; border-radius:50%;
+    background:var(--line); margin-right:6px; vertical-align:middle; }
+  .mic.hot { background:var(--bad); }
 </style>
 </head>
 <body>
@@ -110,6 +130,10 @@ async function renderList() {
         </div>
         <div class="err" id="ingestErr"></div>
       </div>
+      <details class="card settings" id="settingsPanel">
+        <summary>Settings</summary>
+        <div id="settingsBody"></div>
+      </details>
       <div class="card" id="papers"></div>`;
 
     $("up").onclick = async () => {
@@ -124,6 +148,7 @@ async function renderList() {
       if (await send("/api/fetch", body)) $("url").value = "";
     };
     $("url").addEventListener("keydown", (e) => { if (e.key === "Enter") $("go").click(); });
+    renderSettings();
   }
 
   // Only the list is volatile, so only the list gets replaced.
@@ -202,8 +227,8 @@ async function renderPaper() {
       </div>
       <button class="ptt" id="ptt">Hold to ask</button>
       <div class="meta" id="pttHint" style="margin-top:6px">
-        Hold the button, speak, release. Ask a question, or say "go back two minutes",
-        "repeat that section", "show me figure 3".
+        <span class="mic" id="micDot"></span><span id="micState">Tap and hold to ask</span>.
+        Try "go back two minutes", "repeat that section", "show me figure 3", or just ask.
       </div>
       <div class="convo" id="convo"></div>
       <div class="hr"></div>
@@ -236,11 +261,80 @@ async function renderPaper() {
   au.onpause = () => navigator.sendBeacon(`/api/papers/${p.id}/resume`,
     new URLSearchParams({ position: au.currentTime }));
 
-  wirePushToTalk(p, au);
+  wireAsking(p, au);
 }
 
-// ---- push to talk -------------------------------------------------------------
-let history = [], recorder = null, chunks = [], reply = new Audio();
+// ---- settings ----------------------------------------------------------------
+let prefs = null;
+
+const SETTINGS_SPEC = [
+  { key: "activation", label: "How to start talking", type: "select",
+    options: [["both","Tap or hands-free"],["tap","Tap only"],["handsfree","Hands-free only"]],
+    why: "Hands-free listens continuously. Tap is the reliable fallback when it misfires." },
+  { key: "vad_sensitivity", label: "Hands-free sensitivity", type: "select",
+    options: [["low","Low, fewer false triggers"],["medium","Medium"],["high","High, catches quiet speech"]],
+    why: "Lower it if road noise keeps interrupting the narration." },
+  { key: "echo_rejection", label: "Ignore the narration's own voice", type: "toggle",
+    why: "Discards anything matching the words being narrated at that moment." },
+  { key: "answer_depth", label: "Answer depth", type: "select",
+    options: [["fast","Fast, about 3 seconds"],["thorough","Thorough, about 50 seconds"]],
+    why: "Thorough measured 13x slower with no gain on questions the passage already answers." },
+  { key: "stt_model", label: "Speech recognition model", type: "select",
+    options: [["tiny.en","Tiny, about 1.8s"],["base.en","Base, about 2.4s"],["small.en","Small, about 5.4s"]],
+    why: "Larger is more accurate on technical terms but slower. Switching reloads the model once." },
+  { key: "speak_answers", label: "Read answers aloud", type: "toggle",
+    why: "Turn off to read answers on screen without spoken playback." },
+  { key: "auto_resume", label: "Resume narration after answering", type: "toggle",
+    why: "Picks up exactly where it paused." },
+  { key: "keep_screen_awake", label: "Keep the screen awake", type: "toggle",
+    why: "Needed in a car: browsers cut microphone access when the screen sleeps." },
+  { key: "offline_download", label: "Download audio for offline", type: "toggle",
+    why: "Caches the paper so dead spots do not stall playback. About 10MB each." },
+];
+
+async function renderSettings() {
+  prefs = await (await fetch("/api/settings")).json();
+  $("settingsBody").innerHTML = SETTINGS_SPEC.map(s => {
+    const control = s.type === "toggle"
+      ? `<label class="sw"><input type="checkbox" data-k="${s.key}" ${prefs[s.key] ? "checked" : ""}><span></span></label>`
+      : `<select data-k="${s.key}">${s.options.map(([v,t]) =>
+          `<option value="${v}" ${prefs[s.key]===v?"selected":""}>${esc(t)}</option>`).join("")}</select>`;
+    return `<div class="srow"><label>${esc(s.label)}<span class="why">${esc(s.why)}</span></label>${control}</div>`;
+  }).join("");
+  $("settingsBody").querySelectorAll("[data-k]").forEach(el =>
+    el.onchange = async () => {
+      const value = el.type === "checkbox" ? el.checked : el.value;
+      prefs = await (await fetch("/api/settings", {
+        method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ [el.dataset.k]: value })
+      })).json();
+      applyWakeLock();
+    });
+}
+
+// ---- keep the screen awake ------------------------------------------------------
+let wakeLock = null;
+async function applyWakeLock() {
+  try {
+    if (prefs?.keep_screen_awake && !wakeLock && "wakeLock" in navigator) {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => { wakeLock = null; });
+    } else if (!prefs?.keep_screen_awake && wakeLock) {
+      await wakeLock.release(); wakeLock = null;
+    }
+  } catch { /* denied or unsupported; playback still works */ }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") applyWakeLock();
+});
+
+// ---- asking, by tap or hands-free ----------------------------------------------
+let history = [], reply = new Audio(), handsFree = null, busy = false;
+
+const VAD_THRESHOLDS = { low: 0.055, medium: 0.030, high: 0.016 };
+const SILENCE_MS = 900;     // quiet this long means the sentence finished
+const MIN_SPEECH_MS = 350;  // shorter is a cough, a door, a bump in the road
+const PREROLL_MS = 600;     // audio kept before the trigger, so no word is clipped
 
 function addTurn(who, text, cls) {
   const el = document.createElement("div");
@@ -251,106 +345,192 @@ function addTurn(who, text, cls) {
   return el;
 }
 
-function wirePushToTalk(paper, au) {
+async function submitUtterance(paper, au, blob, wasPlaying) {
+  if (busy) return;
+  busy = true;
+  const body = new FormData();
+  body.append("audio", blob, "q.webm");
+  body.append("position", au.currentTime);
+  body.append("history", JSON.stringify(history.slice(-6)));
+  body.append("playing", wasPlaying ? "true" : "false");
+
+  let data;
+  try {
+    const r = await fetch(`/api/papers/${paper.id}/listen`, { method: "POST", body });
+    data = await r.json();
+    if (!r.ok) throw new Error(data.detail || "request failed");
+  } catch (err) {
+    addTurn("Reader", `Could not process that: ${err.message}`, "reader");
+    busy = false;
+    return;
+  }
+
+  // Echo, or nothing intelligible. Say nothing and leave the narration alone: reacting
+  // out loud to every sentence it reads would make hands-free unusable.
+  if (data.kind === "echo" || (!data.transcript && !data.say)) { busy = false; return; }
+
+  au.pause();
+  if (data.transcript) addTurn("You", data.transcript, "you");
+  if (data.say) {
+    addTurn("Reader", data.say, "reader");
+    history.push({ role: "user", content: data.transcript });
+    history.push({ role: "assistant", content: data.say });
+  }
+  if (data.action === "seek") au.currentTime = data.position;
+  if (data.action === "show_figure" && data.figure) {
+    const slot = $("figslot");
+    slot.dataset.fig = "manual";
+    slot.innerHTML = `<figure><img src="/figures/${paper.id}/figures/${data.figure.id}.png"
+      alt="${esc(data.figure.label)}"><figcaption>${esc(data.figure.label)}</figcaption></figure>`;
+  }
+
+  const resume = () => { if (prefs?.auto_resume && data.action !== "pause") au.play(); };
+  if (data.say && prefs?.speak_answers && data.action !== "pause") {
+    try {
+      const spoken = new FormData(); spoken.append("text", data.say);
+      const r = await fetch("/api/speak", { method: "POST", body: spoken });
+      if (r.ok) {
+        reply.src = URL.createObjectURL(await r.blob());
+        reply.onended = resume;
+        await reply.play();
+        busy = false;
+        return;
+      }
+    } catch { /* fall through and just resume */ }
+  }
+  resume();
+  busy = false;
+}
+
+function wireAsking(paper, au) {
   const btn = $("ptt");
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
     btn.disabled = true;
     btn.textContent = "Microphone not available";
+    $("micState").textContent = "This browser will not give us a microphone";
     return;
   }
+  applyWakeLock();
 
+  const mode = prefs?.activation || "both";
+  if (mode === "handsfree") { btn.style.display = "none"; }
+  else wireTapToTalk(paper, au, btn);
+  if (mode !== "tap") startHandsFree(paper, au);
+  else $("micState").textContent = "Tap and hold to ask";
+}
+
+function wireTapToTalk(paper, au, btn) {
+  let recorder = null, chunks = [];
   const start = async (e) => {
     e.preventDefault();
-    if (recorder) return;
-    // Pause first, so the narration is not being recorded by the microphone. This is
-    // the whole of the barge-in design: push-to-talk means a hard mute, and no echo
-    // cancellation is needed because nothing is playing while we listen.
-    au.pause();
-    reply.pause();
+    if (recorder || busy) return;
+    au.pause(); reply.pause();
     let stream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch {
-      btn.textContent = "Microphone blocked";
-      return;
-    }
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true } }); }
+    catch { btn.textContent = "Microphone blocked"; return; }
     chunks = [];
     recorder = new MediaRecorder(stream);
     recorder.ondataavailable = (ev) => ev.data.size && chunks.push(ev.data);
-    recorder.onstop = () => stream.getTracks().forEach((t) => t.stop());
     recorder.start();
-    btn.classList.add("live");
-    btn.textContent = "Listening, release to send";
+    btn.classList.add("live"); btn.textContent = "Listening, release to send";
   };
-
   const stop = async (e) => {
     e.preventDefault();
     if (!recorder) return;
-    const active = recorder;
-    recorder = null;
-    btn.classList.remove("live");
-    btn.textContent = "Thinking";
-    btn.disabled = true;
-    await new Promise((r) => { active.onstop = (ev) => { active.stream?.getTracks?.().forEach(t=>t.stop()); r(ev); }; active.stop(); });
-
-    const body = new FormData();
-    body.append("audio", new Blob(chunks, { type: "audio/webm" }), "q.webm");
-    body.append("position", au.currentTime);
-    body.append("history", JSON.stringify(history.slice(-6)));
-
-    let data;
-    try {
-      const r = await fetch(`/api/papers/${paper.id}/listen`, { method: "POST", body });
-      data = await r.json();
-      if (!r.ok) throw new Error(data.detail || "failed");
-    } catch (err) {
-      addTurn("Reader", `Could not process that: ${err.message}`, "reader");
-      btn.disabled = false; btn.textContent = "Hold to ask";
-      return;
-    }
-
-    if (data.transcript) addTurn("You", data.transcript, "you");
-    if (data.say) {
-      addTurn("Reader", data.say, "reader");
-      history.push({ role: "user", content: data.transcript });
-      history.push({ role: "assistant", content: data.say });
-    }
-
-    if (data.action === "seek") au.currentTime = data.position;
-    if (data.action === "show_figure" && data.figure) {
-      const slot = $("figslot");
-      slot.dataset.fig = "manual";
-      slot.innerHTML = `<figure><img src="/figures/${paper.id}/figures/${data.figure.id}.png"
-        alt="${esc(data.figure.label)}"><figcaption>${esc(data.figure.label)}</figcaption></figure>`;
-    }
-
-    btn.disabled = false;
-    btn.textContent = "Hold to ask";
-
-    // Speak the reply, then resume narration exactly where it was paused.
-    if (data.say && data.action !== "pause") {
-      try {
-        const spoken = new FormData(); spoken.append("text", data.say);
-        const r = await fetch("/api/speak", { method: "POST", body: spoken });
-        if (r.ok) {
-          reply.src = URL.createObjectURL(await r.blob());
-          reply.onended = () => { if (data.action !== "pause") au.play(); };
-          await reply.play();
-          return;
-        }
-      } catch { /* fall through to resuming narration silently */ }
-    }
-    if (data.action !== "pause") au.play();
+    const active = recorder; recorder = null;
+    btn.classList.remove("live"); btn.textContent = "Thinking"; btn.disabled = true;
+    await new Promise((r) => { active.onstop = r; active.stop(); });
+    active.stream.getTracks().forEach((t) => t.stop());
+    await submitUtterance(paper, au, new Blob(chunks, { type: "audio/webm" }), false);
+    btn.disabled = false; btn.textContent = "Hold to ask";
   };
-
   btn.addEventListener("pointerdown", start);
   btn.addEventListener("pointerup", stop);
   btn.addEventListener("pointercancel", stop);
   btn.addEventListener("pointerleave", (e) => { if (recorder) stop(e); });
 }
 
+// Continuous listening. One recorder runs for the whole session and its chunks are kept
+// in a short rolling buffer, so when speech is detected the words already spoken are
+// still available -- opening a fresh stream on each trigger clipped the first syllable.
+//
+// The narration is NOT paused when speech is detected, only once the server confirms it
+// was really the listener. Pausing on every trigger would stutter the audio each time a
+// passenger spoke or the road got loud.
+async function startHandsFree(paper, au) {
+  if (handsFree) return;
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  } catch {
+    $("micState").textContent = "Microphone blocked, tap and hold instead";
+    return;
+  }
+
+  const ctx = new AudioContext();
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 1024;
+  ctx.createMediaStreamSource(stream).connect(analyser);
+  const buf = new Float32Array(analyser.fftSize);
+
+  const recorder = new MediaRecorder(stream);
+  let ring = [];
+  recorder.ondataavailable = (ev) => {
+    if (!ev.data.size) return;
+    ring.push({ at: performance.now(), blob: ev.data });
+    const keep = performance.now() - 30000;
+    while (ring.length && ring[0].at < keep) ring.shift();
+  };
+  recorder.start(200);
+  handsFree = { stream, ctx, recorder };
+
+  let speaking = false, speechStart = 0, lastLoud = 0, floor = 0.01;
+  $("micState").textContent = "Listening, just talk";
+
+  const tick = () => {
+    if (!handsFree) return;
+    analyser.getFloatTimeDomainData(buf);
+    let sum = 0;
+    for (const v of buf) sum += v * v;
+    const level = Math.sqrt(sum / buf.length);
+
+    // A car has a constant broadband hum, so the threshold tracks the noise floor
+    // rather than sitting at a fixed value that would either ignore speech or fire
+    // continuously depending on the road surface.
+    floor = level < floor ? floor * 0.95 + level * 0.05 : floor * 0.999 + level * 0.001;
+    const threshold = Math.max(VAD_THRESHOLDS[prefs?.vad_sensitivity || "medium"], floor * 2.5);
+    const now = performance.now();
+
+    if (level > threshold) {
+      lastLoud = now;
+      if (!speaking && !busy) { speaking = true; speechStart = now; $("micDot").classList.add("hot"); }
+    } else if (speaking && now - lastLoud > SILENCE_MS) {
+      speaking = false;
+      $("micDot").classList.remove("hot");
+      if (lastLoud - speechStart >= MIN_SPEECH_MS) {
+        const from = speechStart - PREROLL_MS;
+        const clip = ring.filter((c) => c.at >= from).map((c) => c.blob);
+        if (clip.length) submitUtterance(paper, au, new Blob(clip, { type: "audio/webm" }), !au.paused);
+      }
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+function stopHandsFree() {
+  if (!handsFree) return;
+  try { handsFree.recorder.stop(); } catch { /* already stopped */ }
+  handsFree.stream.getTracks().forEach((t) => t.stop());
+  handsFree.ctx.close();
+  handsFree = null;
+}
+
 async function render() {
   clearInterval(timer);
+  if (!openPaper) stopHandsFree();   // leaving the player releases the microphone
   await (openPaper ? renderPaper() : renderList());
   // keep polling while anything is queued (no bar yet) or actively processing
   if (document.querySelector(".bar, [data-cancel]")) timer = setInterval(render, 2500);

@@ -29,6 +29,7 @@ log = logging.getLogger(__name__)
 MAX_HISTORY_TURNS = 6
 MAX_CONTEXT_CHARS = 6000
 ANSWER_MAX_TOKENS = 800
+REASONING_MAX_TOKENS = 4000
 
 ANSWER_SYSTEM = """You answer a listener's spoken question about a research paper they are
 part-way through hearing narrated aloud.
@@ -61,8 +62,15 @@ def answer(
     question: str,
     position_s: float,
     history: list[dict] | None = None,
+    thorough: bool = False,
 ) -> dict:
-    """Answer a question, returning the text plus what it was based on."""
+    """Answer a question, returning the text plus what it was based on.
+
+    `thorough` enables the model's reasoning mode. It is off by default because it
+    measured 13x slower for no gain on grounded questions, but it is a setting rather
+    than a hard-coded choice, and it needs a far larger token budget: sharing the answer
+    budget with a thinking block produced an empty answer after 48 seconds.
+    """
     paper = store.get_paper(paper_id)
     if paper is None:
         raise ValueError("no such paper")
@@ -93,15 +101,21 @@ def answer(
         }
     )
 
+    budget = REASONING_MAX_TOKENS if thorough else ANSWER_MAX_TOKENS
     text = _strip_reasoning(
-        llm.chat(messages, max_tokens=ANSWER_MAX_TOKENS, temperature=0.3, thinking=False)
+        llm.chat(messages, max_tokens=budget, temperature=0.3, thinking=thorough)
     )
-    if not text:
-        log.warning("empty answer for %r", question[:60])
+    if not text and thorough:
+        # It reasoned itself out of budget. A fast answer beats silence.
+        log.warning("thorough pass returned nothing for %r; retrying fast", question[:60])
+        text = _strip_reasoning(
+            llm.chat(messages, max_tokens=ANSWER_MAX_TOKENS, temperature=0.3, thinking=False)
+        )
     return {
         "text": text or "I could not put an answer together for that one. Try rephrasing it.",
         "chapter": chapter,
         "grounded": True,
+        "thorough": thorough,
     }
 
 

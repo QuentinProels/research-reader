@@ -4,6 +4,7 @@ The GPUs on this box are AMD/ROCm and already hold the 35B; Kokoro is small enou
 that CPU on 24 cores keeps up comfortably with long-form rendering.
 """
 
+import logging
 import re
 from pathlib import Path
 
@@ -12,6 +13,8 @@ import soundfile as sf
 
 from app import speech
 from app.config import settings
+
+log = logging.getLogger(__name__)
 
 SAMPLE_RATE = 24000
 MAX_CHUNK_CHARS = 500
@@ -92,5 +95,33 @@ def render(segments: list[str], out_path: Path, on_progress=None) -> list[float]
         if on_progress:
             on_progress(index + 1, len(segments))
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(out_path, np.concatenate(audio) if audio else np.zeros(1), SAMPLE_RATE)
+    samples = np.concatenate(audio) if audio else np.zeros(1)
+    sf.write(out_path, samples, SAMPLE_RATE)
+    compress(out_path, samples)
     return offsets
+
+
+def compress(wav_path: Path, samples: np.ndarray | None = None) -> Path | None:
+    """Write an Opus copy next to the wav.
+
+    A 30-minute paper is roughly 100MB as raw wav and 7MB as Opus. That is the
+    difference between usable and unusable on mobile data, which is the whole point for
+    listening in a car. libsndfile does this natively, so no ffmpeg is needed.
+
+    Written to a temporary name and renamed on success. Encoding an hour of audio takes
+    minutes, and a process killed part-way through leaves a file that is valid, playable,
+    and silently short: one interrupted run produced 19.6 minutes of a 75.6 minute paper,
+    and it would have been served as though it were the whole thing.
+    """
+    ogg_path = wav_path.with_suffix(".ogg")
+    partial = ogg_path.with_suffix(".ogg.partial")
+    try:
+        if samples is None:
+            samples, _rate = sf.read(wav_path, dtype="float32")
+        sf.write(partial, samples, SAMPLE_RATE, format="OGG", subtype="OPUS")
+        partial.replace(ogg_path)
+    except BaseException:
+        log.warning("could not write %s, falling back to wav", ogg_path.name, exc_info=True)
+        partial.unlink(missing_ok=True)
+        return None
+    return ogg_path

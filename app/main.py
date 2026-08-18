@@ -6,7 +6,7 @@ from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from app import auth, commands, ingest, llm, qa, store, stt, tts
+from app import auth, commands, echo, ingest, llm, qa, store, stt, tts
 from app.config import settings
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -82,6 +82,16 @@ def api_status():
     }
 
 
+@app.get("/api/settings")
+def api_get_settings():
+    return store.get_settings()
+
+
+@app.post("/api/settings")
+async def api_save_settings(request: Request):
+    return store.save_settings(await request.json())
+
+
 @app.get("/api/papers")
 def api_papers():
     return store.list_papers()
@@ -103,10 +113,16 @@ def api_resume(paper_id: str, position: float = Form(...)):
 
 @app.get("/api/papers/{paper_id}/audio")
 def api_audio(paper_id: str):
+    """Prefer the Opus version. A 30-minute paper is about 100MB as raw wav and about
+    7MB as Opus, which is the difference between usable and not on mobile data."""
     paper = store.get_paper(paper_id)
     if not paper or not paper.get("audio_path"):
         raise HTTPException(404, "no audio yet")
-    return FileResponse(settings.data_dir / paper["audio_path"], media_type="audio/wav")
+    wav = settings.data_dir / paper["audio_path"]
+    ogg = wav.with_suffix(".ogg")
+    if ogg.exists():
+        return FileResponse(ogg, media_type="audio/ogg")
+    return FileResponse(wav, media_type="audio/wav")
 
 
 @app.post("/api/upload")
@@ -157,6 +173,7 @@ async def api_listen(
     audio: UploadFile,
     position: float = Form(0.0),
     history: str = Form("[]"),
+    playing: bool = Form(False),
 ):
     """One push-to-talk utterance: transcribe it, then either act on it or answer it.
 
@@ -172,8 +189,9 @@ async def api_listen(
     clip.parent.mkdir(parents=True, exist_ok=True)
     clip.write_bytes(await audio.read())
 
+    prefs = store.get_settings()
     try:
-        transcript = stt.transcribe(clip)
+        transcript = stt.transcribe(clip, model=prefs["stt_model"])
     except stt.STTUnavailable as exc:
         raise HTTPException(503, str(exc)) from exc
     finally:
@@ -181,6 +199,15 @@ async def api_listen(
 
     if not transcript.strip():
         return {"transcript": "", "action": "none", "say": "I did not catch that."}
+
+    # Hands-free listening hears the narration through the speakers. The transcript says
+    # exactly what was being narrated at this moment, so an utterance that matches it is
+    # echo however convincing it sounded. Silently ignored: announcing it would mean the
+    # app talking back at every sentence it reads.
+    if playing and prefs["echo_rejection"]:
+        nearby = echo.narration_near(store.chunks_around(paper_id, position, 30.0), position)
+        if echo.is_echo(transcript, nearby):
+            return {"transcript": transcript, "kind": "echo", "action": "none", "say": ""}
 
     command = commands.parse(transcript)
     reply: dict = {"transcript": transcript, "kind": command.kind}
@@ -219,7 +246,10 @@ async def api_listen(
             history_turns = json.loads(history)
         except json.JSONDecodeError:
             history_turns = []
-        answered = qa.answer(paper_id, transcript, position, history_turns)
+        answered = qa.answer(
+            paper_id, transcript, position, history_turns,
+            thorough=prefs["answer_depth"] == "thorough",
+        )
         reply |= {"action": "answer", "say": answered["text"],
                   "chapter": answered["chapter"]}
     return reply

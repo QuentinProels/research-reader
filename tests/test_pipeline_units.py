@@ -148,3 +148,43 @@ class TestReflowPreservesReferences:
 
         out = llm.reflow("The model has dimension dk [5], improving on prior art (Smith et al., 2020).")
         assert "[5]" not in out and "Smith" not in out
+
+
+class TestRefusalDetection:
+    """The reflow model sometimes answers about a passage instead of returning it, and
+    the answer then gets narrated in the same voice as the paper. Found in the wild:
+    2 chunks in 2244 said "no substantive prose to clean" mid-section."""
+
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "As there is no substantive prose to clean, summarize, or read aloud, no output can be generated",
+            "There is no prose here to reflow.",
+            "I cannot process this block.",
+            "The provided text contains no readable sentences.",
+        ],
+    )
+    def test_model_commentary_is_recognised(self, text):
+        from app.pipeline import _is_refusal
+
+        assert _is_refusal(text)
+
+    def test_real_prose_is_kept(self):
+        from app.pipeline import _is_refusal
+
+        assert not _is_refusal(
+            "The encoder is composed of a stack of six identical layers, each with a "
+            "multi-head self attention mechanism and a position wise feed forward network."
+        )
+
+    def test_a_long_passage_mentioning_the_phrase_is_kept(self):
+        """A paper discussing what a model cannot do is prose, not a refusal."""
+        from app.pipeline import _is_refusal
+
+        long_passage = (
+            "Prior work observed that the model cannot represent positions beyond its "
+            "training length, and that no output can be generated past that horizon "
+            "without extrapolation. " * 4
+        )
+        assert not _is_refusal(long_passage)
