@@ -51,6 +51,17 @@
     border-radius:999px; padding:4px 11px; font-size:.78rem; cursor:pointer; font-weight:400; }
   .chip.fig { border-color:var(--accent); color:var(--accent); }
   .back { background:none; color:var(--muted); padding:0; font-weight:400; font-size:.82rem; }
+  .ptt { width:100%; margin-top:12px; padding:14px; font-size:.95rem; border-radius:10px;
+    background:var(--accent); color:#fff; border:0; font-weight:600; cursor:pointer;
+    touch-action:none; user-select:none; }
+  .ptt.live { background:var(--bad); }
+  .ptt:disabled { opacity:.5; }
+  .convo { margin-top:12px; display:flex; flex-direction:column; gap:8px; }
+  .turn { font-size:.86rem; padding:9px 12px; border-radius:10px; max-width:92%; }
+  .turn.you { align-self:flex-end; background:var(--line); }
+  .turn.reader { align-self:flex-start; border:1px solid var(--line); }
+  .turn .who { display:block; font-size:.68rem; color:var(--muted); margin-bottom:3px; }
+  .thinking { color:var(--muted); font-style:italic; }
 </style>
 </head>
 <body>
@@ -189,6 +200,12 @@ async function renderPaper() {
         <input type="range" id="rate" min="0.75" max="2" step="0.05" value="1" style="flex:1">
         <div style="flex:0 0 44px" class="meta" id="rateLabel">1.00×</div>
       </div>
+      <button class="ptt" id="ptt">Hold to ask</button>
+      <div class="meta" id="pttHint" style="margin-top:6px">
+        Hold the button, speak, release. Ask a question, or say "go back two minutes",
+        "repeat that section", "show me figure 3".
+      </div>
+      <div class="convo" id="convo"></div>
       <div class="hr"></div>
       <div class="chips">
         ${p.chapters.map(c => `<button class="chip" data-t="${c.start_s}">${esc(c.title)}</button>`).join("")}
@@ -218,6 +235,118 @@ async function renderPaper() {
   };
   au.onpause = () => navigator.sendBeacon(`/api/papers/${p.id}/resume`,
     new URLSearchParams({ position: au.currentTime }));
+
+  wirePushToTalk(p, au);
+}
+
+// ---- push to talk -------------------------------------------------------------
+let history = [], recorder = null, chunks = [], reply = new Audio();
+
+function addTurn(who, text, cls) {
+  const el = document.createElement("div");
+  el.className = `turn ${cls}`;
+  el.innerHTML = `<span class="who">${esc(who)}</span>${esc(text)}`;
+  $("convo").append(el);
+  el.scrollIntoView({ block: "nearest" });
+  return el;
+}
+
+function wirePushToTalk(paper, au) {
+  const btn = $("ptt");
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+    btn.disabled = true;
+    btn.textContent = "Microphone not available";
+    return;
+  }
+
+  const start = async (e) => {
+    e.preventDefault();
+    if (recorder) return;
+    // Pause first, so the narration is not being recorded by the microphone. This is
+    // the whole of the barge-in design: push-to-talk means a hard mute, and no echo
+    // cancellation is needed because nothing is playing while we listen.
+    au.pause();
+    reply.pause();
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      btn.textContent = "Microphone blocked";
+      return;
+    }
+    chunks = [];
+    recorder = new MediaRecorder(stream);
+    recorder.ondataavailable = (ev) => ev.data.size && chunks.push(ev.data);
+    recorder.onstop = () => stream.getTracks().forEach((t) => t.stop());
+    recorder.start();
+    btn.classList.add("live");
+    btn.textContent = "Listening, release to send";
+  };
+
+  const stop = async (e) => {
+    e.preventDefault();
+    if (!recorder) return;
+    const active = recorder;
+    recorder = null;
+    btn.classList.remove("live");
+    btn.textContent = "Thinking";
+    btn.disabled = true;
+    await new Promise((r) => { active.onstop = (ev) => { active.stream?.getTracks?.().forEach(t=>t.stop()); r(ev); }; active.stop(); });
+
+    const body = new FormData();
+    body.append("audio", new Blob(chunks, { type: "audio/webm" }), "q.webm");
+    body.append("position", au.currentTime);
+    body.append("history", JSON.stringify(history.slice(-6)));
+
+    let data;
+    try {
+      const r = await fetch(`/api/papers/${paper.id}/listen`, { method: "POST", body });
+      data = await r.json();
+      if (!r.ok) throw new Error(data.detail || "failed");
+    } catch (err) {
+      addTurn("Reader", `Could not process that: ${err.message}`, "reader");
+      btn.disabled = false; btn.textContent = "Hold to ask";
+      return;
+    }
+
+    if (data.transcript) addTurn("You", data.transcript, "you");
+    if (data.say) {
+      addTurn("Reader", data.say, "reader");
+      history.push({ role: "user", content: data.transcript });
+      history.push({ role: "assistant", content: data.say });
+    }
+
+    if (data.action === "seek") au.currentTime = data.position;
+    if (data.action === "show_figure" && data.figure) {
+      const slot = $("figslot");
+      slot.dataset.fig = "manual";
+      slot.innerHTML = `<figure><img src="/figures/${paper.id}/figures/${data.figure.id}.png"
+        alt="${esc(data.figure.label)}"><figcaption>${esc(data.figure.label)}</figcaption></figure>`;
+    }
+
+    btn.disabled = false;
+    btn.textContent = "Hold to ask";
+
+    // Speak the reply, then resume narration exactly where it was paused.
+    if (data.say && data.action !== "pause") {
+      try {
+        const spoken = new FormData(); spoken.append("text", data.say);
+        const r = await fetch("/api/speak", { method: "POST", body: spoken });
+        if (r.ok) {
+          reply.src = URL.createObjectURL(await r.blob());
+          reply.onended = () => { if (data.action !== "pause") au.play(); };
+          await reply.play();
+          return;
+        }
+      } catch { /* fall through to resuming narration silently */ }
+    }
+    if (data.action !== "pause") au.play();
+  };
+
+  btn.addEventListener("pointerdown", start);
+  btn.addEventListener("pointerup", stop);
+  btn.addEventListener("pointercancel", stop);
+  btn.addEventListener("pointerleave", (e) => { if (recorder) stop(e); });
 }
 
 async function render() {

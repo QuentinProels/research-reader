@@ -61,7 +61,7 @@ def _heartbeat_loop(worker_id: str, stop: threading.Event) -> None:
     while not stop.wait(HEARTBEAT_SECONDS):
         try:
             store.worker_seen(worker_id)
-        except Exception:  # noqa: BLE001 -- a blip here must not take the worker down
+        except Exception:
             log.warning("heartbeat failed", exc_info=True)
 
 
